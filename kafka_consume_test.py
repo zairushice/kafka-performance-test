@@ -13,6 +13,10 @@ from time import monotonic as now
 logging.basicConfig(level=logging.ERROR,
                     format='%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s')
 
+topic1 = 'proxy_twin'
+topic2 = 'twin_proxy'
+topic3 = 'dmc_twin'
+topic4 = 'twin_dmc'
 queue = Queue(maxsize=30000)
 bootstrap_servers = ['kafka-service:9092']
 client = InfluxDBClient('influxdb-service', 8086)
@@ -31,23 +35,19 @@ def took(func):
 
 
 def recv(bootstrap_servers, topic):
-    while True:
+    consumer = KafkaConsumer(topic, bootstrap_servers=bootstrap_servers, auto_offset_reset='earliest',
+                             group_id='adw-service', auto_commit_interval_ms=5000, consumer_timeout_ms=300000)
+#            consumer.assign([TopicPartition(topic=topic, partition=0)])
+#            consumer.seek(TopicPartition(topic=topic, partition=0), 0)
+    print("start listening")
+    for msg in consumer:
         try:
-            consumer = KafkaConsumer(topic, bootstrap_servers=bootstrap_servers, group_id='kafka-test1',
-                                     auto_commit_interval_ms=5000, auto_offset_reset='earliest')
-            #            consumer.assign([TopicPartition(topic=topic, partition=0)])
-            #            consumer.seek(TopicPartition(topic=topic, partition=0), 0)
-            print("start listening")
-            for msg in consumer:
-                try:
-                    queue.put_nowait(msg.value)
-                except Full:
-                    print('queue is full')
-                    time.sleep(1)
-        except Exception as e:
-            print(e)
-            time.sleep(5)
-            continue
+            queue.put_nowait(msg.value)
+        except Full:
+            print('queue is full')
+            time.sleep(1)
+        except StopIteration:
+            break
 
 
 def batch_beat():
@@ -65,9 +65,9 @@ def batch_beat():
     return msgs
 
 
-def parse_time(time):
+def parse_time(t):
     try:
-        return datetime.datetime.fromtimestamp(time / 1000)
+        return datetime.datetime.fromtimestamp(t / 1000)
     except Exception:
         return datetime.datetime.now()
 
@@ -217,7 +217,7 @@ def sink(message):
                                'deviceIdentifier': tags.get('devId'),
                                'attributeIdentifier': tags.get('attributeIdentifier'), 'projectIdentifier': 1,
                                'hour': hour}
-                row['fields'] = {'value': row.get('fields').get('value')}
+                row['fields'] = {'value': float(row.get('fields').get('value'))}
                 row['time'] = row.get('time').replace(microsecond=0)
                 points.append(row)
         except Exception as e:
@@ -260,14 +260,15 @@ def check_row_format(row):
         return str(e)
 
 
-th_recv = Thread(target=recv, args=(bootstrap_servers, 'twin_dmc'))
-th_recv.daemon = True
-th_recv.start()
-
-
 def main():
+    th_recv = Thread(target=recv, daemon=True, args=(bootstrap_servers, topic4))
+    th_recv.start()
     while True:
         try:
+            if not th_recv.is_alive():
+                print("recv restart...")
+                th_recv = Thread(target=recv, daemon=True, args=(bootstrap_servers, topic4))
+                th_recv.start()
             start = int(time.time() * 1000)
             length = 0
             count = 0
@@ -287,12 +288,11 @@ def main():
             end = int(time.time() * 1000)
             if length == 0:
                 continue
-            print("消费{}数据用了{}ms, 消费速度为{}, 实际插入数据{}, beat和bolt用了{}ms, 处理速度为{}, sink用了{}ms, sink速度为{}"
-                  .format(length, end - start, length / (end - start) * 1000,
-                          count, take2, length / take2 * 1000, take, count / take * 1000))
+            print("消费{}数据用了{}ms, 消费速度为{}, 实际插入数据{}, beat和bolt用了{}ms, 处理速度为{}, sink用了{}ms, "
+                  "sink速度为{}".format(length, end - start, length / (end - start) * 1000,
+                                     count, take2, length / take2 * 1000, take, count / take * 1000))
         except Exception as e:
-            print(e)
+            logging.error(e)
             time.sleep(1)
-
 
 main()
